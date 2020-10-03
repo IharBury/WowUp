@@ -11,7 +11,7 @@ using WowUp.Common.Models.Addons;
 using WowUp.WPF.AddonProviders.Contracts;
 using WowUp.WPF.Entities;
 using WowUp.WPF.Models.WowUp;
-
+using WowUp.WPF.Utilities;
 using OctokitRateLimitExceededException = Octokit.RateLimitExceededException;
 using WowUpRateLimitExceededException = WowUp.Common.Exceptions.RateLimitExceededException;
 
@@ -19,7 +19,7 @@ namespace WowUp.WPF.AddonProviders
 {
     public class GitHubAddonProvider : IGitHubAddonProvider
     {
-        private const string ProductName = "WowUp";
+        private const string ProductName = "WowUp-Client";
 
         private static readonly string[] ReleaseContentTypes = new[] { "application/x-zip-compressed", "application/zip" };
 
@@ -191,7 +191,7 @@ namespace WowUp.WPF.AddonProviders
 
         private GitHubClient GetClient()
         {
-            return new GitHubClient(new ProductHeaderValue(ProductName));
+            return new GitHubClient(new ProductHeaderValue(ProductName, AppUtilities.CurrentVersionString));
         }
 
         private async Task<IEnumerable<Release>> GetReleases(GitHubClient client, RepositoryName repositoryName)
