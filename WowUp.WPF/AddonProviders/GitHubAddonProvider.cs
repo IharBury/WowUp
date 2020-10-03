@@ -198,7 +198,7 @@ namespace WowUp.WPF.AddonProviders
         {
             return releases
                 .Where(r => !r.Draft)
-                .GroupBy(r => GetChannelType(r.TagName))
+                .GroupBy(GetChannelType)
                 .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.PublishedAt).First());
         }
 
@@ -207,11 +207,15 @@ namespace WowUp.WPF.AddonProviders
             return releases.SelectMany(r => r.Assets).Where(IsValidContentType).Sum(a => a.DownloadCount);
         }
 
-        private AddonChannelType GetChannelType(string tagName)
+        private AddonChannelType GetChannelType(Release release)
         {
-            if (tagName.Contains("alpha", StringComparison.OrdinalIgnoreCase))
+            if (release.TagName.Contains("alpha", StringComparison.OrdinalIgnoreCase) ||
+                release.Name.Contains("alpha", StringComparison.OrdinalIgnoreCase) ||
+                release.Assets.Any(a => a.Name.Contains("alpha", StringComparison.OrdinalIgnoreCase)))
                 return AddonChannelType.Alpha;
-            if (tagName.Contains("beta", StringComparison.OrdinalIgnoreCase))
+            if (release.TagName.Contains("beta", StringComparison.OrdinalIgnoreCase) ||
+                release.Name.Contains("beta", StringComparison.OrdinalIgnoreCase) ||
+                release.Assets.Any(a => a.Name.Contains("beta", StringComparison.OrdinalIgnoreCase)))
                 return AddonChannelType.Beta;
             return AddonChannelType.Stable;
         }
