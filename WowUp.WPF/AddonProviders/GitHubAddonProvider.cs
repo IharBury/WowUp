@@ -86,75 +86,70 @@ namespace WowUp.WPF.AddonProviders
         public async Task<PotentialAddon> Search(Uri addonUri, WowClientType clientType)
         {
             var repositoryName = GetRepositoryNameFromAddonUri(addonUri);
-            var latestVersion = await TryGetLatestVersion(GetClient(), repositoryName, clientType);
-            if (latestVersion == null)
+            var addon = await GetAddon(GetClient(), repositoryName, clientType);
+            if (addon == null)
             {
                 throw new NoReleaseFoundException();
             }
 
             return new PotentialAddon
             {
-                Author = latestVersion.Repository.Owner.Login,
-                DownloadCount = latestVersion.Asset.DownloadCount,
+                Author = addon.Repository.Owner.Login,
+                DownloadCount = addon.DownloadCount,
                 ExternalId = GetAddonIdForRepository(repositoryName),
-                ExternalUrl = latestVersion.Release.Url,
-                Name = latestVersion.Asset.Name,
+                ExternalUrl = addon.Repository.HtmlUrl,
+                Name = addon.Repository.Name,
                 ProviderName = Name,
-                ThumbnailUrl = latestVersion.Repository.Owner.AvatarUrl
+                ThumbnailUrl = addon.Repository.Owner.AvatarUrl
             };
         }
 
         private async Task<AddonSearchResult> GetById(GitHubClient client, string addonId, WowClientType clientType)
         {
             var repositoryName = GetRepositoryNameFromAddonId(addonId);
-            var latestVersion = await TryGetLatestVersion(client, repositoryName, clientType);
-            if (latestVersion == null)
+            var addon = await GetAddon(client, repositoryName, clientType);
+            if (addon == null)
             {
                 return null;
             }
 
-            var name = GetAddonName(addonId);
             return new AddonSearchResult
             {
-                Author = latestVersion.Repository.Owner.Login,
+                Author = addon.Repository.Owner.Login,
                 ExternalId = addonId,
-                ExternalUrl = latestVersion.Asset.Url,
-                Files = new List<AddonSearchResultFile> {
-                    new AddonSearchResultFile
+                ExternalUrl = addon.Repository.HtmlUrl,
+                Files = addon.LatestVersions
+                    .Select(v => new AddonSearchResultFile
                     {
-                        ChannelType = AddonChannelType.Stable,
-                        DownloadUrl = latestVersion.Asset.BrowserDownloadUrl,
-                        Folders = new List<string> { name },
+                        ChannelType = v.ChannelType,
+                        DownloadUrl = v.Asset.BrowserDownloadUrl,
+                        Folders = new List<string> { addon.Repository.Name },
                         GameVersion = string.Empty,
-                        Version = latestVersion.Asset.Name,
-                        ReleaseDate = latestVersion.Asset.CreatedAt.UtcDateTime
-                    }
-                },
-                Name = name,
+                        Version = v.Release.TagName,
+                        ReleaseDate = v.Asset.CreatedAt.UtcDateTime
+                    })
+                    .ToList(),
+                Name = addon.Repository.Name,
                 ProviderName = Name,
-                ThumbnailUrl = latestVersion.Repository.Owner.AvatarUrl
+                ThumbnailUrl = addon.Repository.Owner.AvatarUrl
             };
         }
 
-        private async Task<Version> TryGetLatestVersion(GitHubClient client, RepositoryName repositoryName, WowClientType clientType)
+        private async Task<GitHubAddon> GetAddon(GitHubClient client, RepositoryName repositoryName, WowClientType clientType)
         {
             try
             {
-                var results = await client.Repository.Release.GetAll(repositoryName.Owner, repositoryName.Name);
-                var latestRelease = GetLatestRelease(results);
-                if (latestRelease == null)
-                {
-                    return null;
-                }
-
-                var asset = GetValidAsset(latestRelease, clientType);
-                if (asset == null)
-                {
-                    return null;
-                }
-
                 var repository = await client.Repository.Get(repositoryName.Owner, repositoryName.Name);
-                return new Version(latestRelease, asset, repository);
+                var releases = await client.Repository.Release.GetAll(repositoryName.Owner, repositoryName.Name);
+                var latestVersions = GetLatestReleases(releases)
+                    .Select(x => new { ChannelType = x.Key, Release = x.Value, Asset = GetValidAsset(x.Value, clientType) })
+                    .Where(x => x.Asset != null)
+                    .Select(x => new Version(x.Release, x.Asset, x.ChannelType))
+                    .ToList();
+                if (!latestVersions.Any())
+                    return null;
+                var downloadCount = GetDownloadCount(releases);
+                return new GitHubAddon(repository, downloadCount, latestVersions);
             }
             catch (OctokitRateLimitExceededException ex)
             {
@@ -199,20 +194,26 @@ namespace WowUp.WPF.AddonProviders
                 .FirstOrDefault();
         }
 
-        private Release GetLatestRelease(IEnumerable<Release> releases)
+        private Dictionary<AddonChannelType, Release> GetLatestReleases(IEnumerable<Release> releases)
         {
             return releases
                 .Where(r => !r.Draft)
-                .OrderByDescending(r => r.PublishedAt)
-                .FirstOrDefault();
+                .GroupBy(r => GetChannelType(r.TagName))
+                .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.PublishedAt).First());
         }
 
-        private string GetAddonName(string addonId)
+        private int GetDownloadCount(IEnumerable<Release> releases)
         {
-            return addonId.Split("/")
-                .Where(str => !string.IsNullOrEmpty(str))
-                .Skip(1)
-                .FirstOrDefault();
+            return releases.SelectMany(r => r.Assets).Where(IsValidContentType).Sum(a => a.DownloadCount);
+        }
+
+        private AddonChannelType GetChannelType(string tagName)
+        {
+            if (tagName.Contains("alpha", StringComparison.OrdinalIgnoreCase))
+                return AddonChannelType.Alpha;
+            if (tagName.Contains("beta", StringComparison.OrdinalIgnoreCase))
+                return AddonChannelType.Beta;
+            return AddonChannelType.Stable;
         }
 
         private bool IsNotNoLib(ReleaseAsset asset)
@@ -267,19 +268,33 @@ namespace WowUp.WPF.AddonProviders
         }
 
 
+        private class GitHubAddon
+        {
+            public GitHubAddon(Repository repository, int downloadCount, IEnumerable<Version> latestVersions)
+            {
+                Repository = repository ?? throw new ArgumentNullException(nameof(repository));
+                DownloadCount = downloadCount;
+                LatestVersions = latestVersions.ToList();
+            }
+
+            public Repository Repository { get; }
+            public int DownloadCount { get; }
+            public IReadOnlyCollection<Version> LatestVersions { get; }
+        }
+
+
         private class Version
         {
-            public Version(Release release, ReleaseAsset releaseAsset, Repository repository)
+            public Version(Release release, ReleaseAsset asset, AddonChannelType channelType)
             {
                 Release = release ?? throw new ArgumentNullException(nameof(release));
-                ReleaseAsset = releaseAsset ?? throw new ArgumentNullException(nameof(releaseAsset));
-                Repository = repository ?? throw new ArgumentNullException(nameof(repository));
+                Asset = asset ?? throw new ArgumentNullException(nameof(asset));
+                ChannelType = channelType;
             }
 
             public Release Release { get; }
-            public ReleaseAsset ReleaseAsset { get; }
             public ReleaseAsset Asset { get; }
-            public Repository Repository { get; }
+            public AddonChannelType ChannelType { get; }
         }
     }
 }
