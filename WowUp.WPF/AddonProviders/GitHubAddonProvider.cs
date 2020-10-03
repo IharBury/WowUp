@@ -35,11 +35,12 @@ namespace WowUp.WPF.AddonProviders
 
         public async Task<IList<AddonSearchResult>> GetAll(WowClientType clientType, IEnumerable<string> addonIds)
         {
+            var client = GetClient();
             var searchResults = new List<AddonSearchResult>();
 
             foreach (var addonId in addonIds)
             {
-                var result = await GetById(addonId, clientType);
+                var result = await GetById(client, addonId, clientType);
                 if (result == null)
                 {
                     continue;
@@ -51,57 +52,9 @@ namespace WowUp.WPF.AddonProviders
             return searchResults;
         }
 
-        public async Task<AddonSearchResult> GetById(string addonId, WowClientType clientType)
+        public Task<AddonSearchResult> GetById(string addonId, WowClientType clientType)
         {
-            var repositoryName = GetRepositoryNameFromAddonId(addonId);
-            var client = GetClient();
-            var results = await GetReleases(client, repositoryName);
-
-            if (!results.Any())
-            {
-                return null;
-            }
-
-            var latestRelease = GetLatestRelease(results);
-            if (latestRelease == null)
-            {
-                return null;
-            }
-
-            var asset = GetValidAsset(latestRelease, clientType);
-            if (asset == null)
-            {
-                return null;
-            }
-
-            var repository = await GetRepository(client, repositoryName);
-            var author = repository.Owner.Login;
-            var authorImageUrl = repository.Owner.AvatarUrl;
-
-            var name = GetAddonName(addonId);
-
-            var searchResultFile = new AddonSearchResultFile
-            {
-                ChannelType = AddonChannelType.Stable,
-                DownloadUrl = asset.BrowserDownloadUrl,
-                Folders = new List<string> { name },
-                GameVersion = string.Empty,
-                Version = asset.Name,
-                ReleaseDate = asset.CreatedAt.UtcDateTime
-            };
-
-            var searchResult = new AddonSearchResult
-            {
-                Author = author,
-                ExternalId = addonId,
-                ExternalUrl = asset.Url,
-                Files = new List<AddonSearchResultFile> { searchResultFile },
-                Name = name,
-                ProviderName = Name,
-                ThumbnailUrl = authorImageUrl
-            };
-
-            return searchResult;
+            return GetById(GetClient(), addonId, clientType);
         }
 
         public void OnPostInstall(Addon addon)
@@ -133,37 +86,80 @@ namespace WowUp.WPF.AddonProviders
         public async Task<PotentialAddon> Search(Uri addonUri, WowClientType clientType)
         {
             var repositoryName = GetRepositoryNameFromAddonUri(addonUri);
-            var client = GetClient();
-
-            var results = await GetReleases(client, repositoryName);
-            var latestRelease = GetLatestRelease(results);
-            if (latestRelease == null)
+            var latestVersion = await TryGetLatestVersion(GetClient(), repositoryName, clientType);
+            if (latestVersion == null)
             {
                 throw new NoReleaseFoundException();
             }
 
-            var asset = GetValidAsset(latestRelease, clientType);
-            if (asset == null)
+            return new PotentialAddon
             {
-                throw new NoReleaseFoundException();
-            }
-
-            var repository = await GetRepository(client, repositoryName);
-            var author = repository.Owner.Login;
-            var authorImageUrl = repository.Owner.AvatarUrl;
-
-            var potentialAddon = new PotentialAddon
-            {
-                Author = author,
-                DownloadCount = asset.DownloadCount,
+                Author = latestVersion.Repository.Owner.Login,
+                DownloadCount = latestVersion.Asset.DownloadCount,
                 ExternalId = GetAddonIdForRepository(repositoryName),
-                ExternalUrl = latestRelease.Url,
-                Name = asset.Name,
+                ExternalUrl = latestVersion.Release.Url,
+                Name = latestVersion.Asset.Name,
                 ProviderName = Name,
-                ThumbnailUrl = authorImageUrl
+                ThumbnailUrl = latestVersion.Repository.Owner.AvatarUrl
             };
+        }
 
-            return potentialAddon;
+        private async Task<AddonSearchResult> GetById(GitHubClient client, string addonId, WowClientType clientType)
+        {
+            var repositoryName = GetRepositoryNameFromAddonId(addonId);
+            var latestVersion = await TryGetLatestVersion(client, repositoryName, clientType);
+            if (latestVersion == null)
+            {
+                return null;
+            }
+
+            var name = GetAddonName(addonId);
+            return new AddonSearchResult
+            {
+                Author = latestVersion.Repository.Owner.Login,
+                ExternalId = addonId,
+                ExternalUrl = latestVersion.Asset.Url,
+                Files = new List<AddonSearchResultFile> {
+                    new AddonSearchResultFile
+                    {
+                        ChannelType = AddonChannelType.Stable,
+                        DownloadUrl = latestVersion.Asset.BrowserDownloadUrl,
+                        Folders = new List<string> { name },
+                        GameVersion = string.Empty,
+                        Version = latestVersion.Asset.Name,
+                        ReleaseDate = latestVersion.Asset.CreatedAt.UtcDateTime
+                    }
+                },
+                Name = name,
+                ProviderName = Name,
+                ThumbnailUrl = latestVersion.Repository.Owner.AvatarUrl
+            };
+        }
+
+        private async Task<Version> TryGetLatestVersion(GitHubClient client, RepositoryName repositoryName, WowClientType clientType)
+        {
+            try
+            {
+                var results = await client.Repository.Release.GetAll(repositoryName.Owner, repositoryName.Name);
+                var latestRelease = GetLatestRelease(results);
+                if (latestRelease == null)
+                {
+                    return null;
+                }
+
+                var asset = GetValidAsset(latestRelease, clientType);
+                if (asset == null)
+                {
+                    return null;
+                }
+
+                var repository = await client.Repository.Get(repositoryName.Owner, repositoryName.Name);
+                return new Version(latestRelease, asset, repository);
+            }
+            catch (OctokitRateLimitExceededException ex)
+            {
+                throw new WowUpRateLimitExceededException(ex);
+            }
         }
 
         private RepositoryName GetRepositoryNameFromAddonUri(Uri addonUri)
@@ -192,30 +188,6 @@ namespace WowUp.WPF.AddonProviders
         private GitHubClient GetClient()
         {
             return new GitHubClient(new ProductHeaderValue(ProductName, AppUtilities.CurrentVersionString));
-        }
-
-        private async Task<IEnumerable<Release>> GetReleases(GitHubClient client, RepositoryName repositoryName)
-        {
-            try
-            {
-                return await client.Repository.Release.GetAll(repositoryName.Owner, repositoryName.Name);
-            }
-            catch (OctokitRateLimitExceededException ex)
-            {
-                throw new WowUpRateLimitExceededException(ex);
-            }
-        }
-
-        private async Task<Repository> GetRepository(GitHubClient client, RepositoryName name)
-        {
-            try
-            {
-                return await client.Repository.Get(name.Owner, name.Name);
-            }
-            catch (OctokitRateLimitExceededException ex)
-            {
-                throw new WowUpRateLimitExceededException(ex);
-            }
         }
 
         private ReleaseAsset GetValidAsset(Release release, WowClientType clientType)
@@ -292,6 +264,22 @@ namespace WowUp.WPF.AddonProviders
 
             public string Owner { get; }
             public string Name { get; }
+        }
+
+
+        private class Version
+        {
+            public Version(Release release, ReleaseAsset releaseAsset, Repository repository)
+            {
+                Release = release ?? throw new ArgumentNullException(nameof(release));
+                ReleaseAsset = releaseAsset ?? throw new ArgumentNullException(nameof(releaseAsset));
+                Repository = repository ?? throw new ArgumentNullException(nameof(repository));
+            }
+
+            public Release Release { get; }
+            public ReleaseAsset ReleaseAsset { get; }
+            public ReleaseAsset Asset { get; }
+            public Repository Repository { get; }
         }
     }
 }
